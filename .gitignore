@@ -12,3 +12,6 @@ dist/
 config.yaml
 templates/
 tests/fixtures/*.mp4
+
+# Personal notes (not part of the project)
+obsidian-note.md
