@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -14,10 +13,9 @@ from .feed_detect import red_mask
 from .video import crop, iter_frames, probe
 
 
-# Pixel dimensions of the patches we crop out of the feed.
-# Tuned for 1920x1080; at other resolutions the ROI scales with the frame.
-ELIM_X_PATCH = (24, 24)        # (h, w) of the elim marker
-ICON_PATCH = (40, 40)          # (h, w) of the hero icon
+# Tuned for 1920x1080; ROI already scales with the frame so these stay fixed.
+ELIM_X_PATCH = (24, 24)  # (h, w)
+ICON_PATCH = (40, 40)    # (h, w)
 
 
 @dataclass
@@ -104,7 +102,6 @@ def extract(sample_video: Path, cfg: Config) -> ExtractResult:
                 best_x_score = score
                 best_x_crop = x_crop
 
-        # killer (player) icon sits to the LEFT of the X, roughly one icon-width over
         icon_cx = cx_x - (pw_x // 2 + pw_i // 2 + 2)
         icon_cy = cy_y
         icon = _crop_centered(roi, icon_cx, icon_cy, ph_i, pw_i)
@@ -118,21 +115,16 @@ def extract(sample_video: Path, cfg: Config) -> ExtractResult:
             "adjust feed_region in your config."
         )
 
-    # Cluster icons by phash Hamming distance <= 6, keep biggest cluster
-    cluster_of: list[int] = [-1] * len(icon_hashes)
+    # Cluster icons by phash Hamming distance <= 6; biggest cluster wins
+    # because the user's most-played hero shows up in the kill-feed most often.
     clusters: list[list[int]] = []
     for i, hi in enumerate(icon_hashes):
-        placed = False
-        for ci, cl in enumerate(clusters):
-            # compare to cluster representative (first member)
+        for cl in clusters:
             if hi - icon_hashes[cl[0]] <= 6:
                 cl.append(i)
-                cluster_of[i] = ci
-                placed = True
                 break
-        if not placed:
+        else:
             clusters.append([i])
-            cluster_of[i] = len(clusters) - 1
 
     if not clusters:
         raise RuntimeError("found kill rows but could not crop any icons.")

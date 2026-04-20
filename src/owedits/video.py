@@ -42,8 +42,8 @@ def iter_frames(
 ) -> Iterator[tuple[float, np.ndarray]]:
     """Yield (timestamp_s, BGR frame) sampled at roughly `sample_fps`.
 
-    Uses frame-index stepping rather than CAP_PROP_POS_MSEC seeking so it stays
-    fast on long recordings.
+    Reads sequentially and grab-skips between samples. Seeking via
+    CAP_PROP_POS_FRAMES in a loop is ~10x slower on long recordings.
     """
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
@@ -56,12 +56,16 @@ def iter_frames(
 
         idx = 0
         while True:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
             ok, frame = cap.read()
             if not ok or frame is None:
                 break
             yield idx / src_fps, frame
-            idx += step
+            # Advance `step - 1` frames cheaply without decoding.
+            for _ in range(step - 1):
+                if not cap.grab():
+                    return
+                idx += 1
+            idx += 1
     finally:
         cap.release()
 

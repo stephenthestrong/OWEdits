@@ -7,7 +7,7 @@ import cv2
 import numpy as np
 
 from .config import Config
-from .video import crop, iter_frames, probe
+from .video import VideoMeta, crop, iter_frames, probe
 
 
 # OW's elim-X is a saturated red. Two hue bands wrap around 0/180 in HSV.
@@ -44,9 +44,11 @@ def detect_kill_frames(
     cfg: Config,
     elim_x_tpl: np.ndarray,
     player_icon_tpl: np.ndarray | None,
-) -> list[KillEvent]:
-    """Scan a video and return deduped kill-event timestamps."""
-    meta = probe(video_path)
+    meta: VideoMeta | None = None,
+) -> tuple[list[KillEvent], VideoMeta]:
+    """Scan a video and return (deduped kill events, video metadata)."""
+    if meta is None:
+        meta = probe(video_path)
     fx, fy, fw, fh = cfg.feed_region.as_pixels(meta.width, meta.height)
 
     raw_hits: list[float] = []
@@ -80,7 +82,7 @@ def detect_kill_frames(
 
         raw_hits.append(t)
 
-    return _dedupe(video_path, raw_hits, cfg.dedupe_window_s)
+    return _dedupe(video_path, raw_hits, cfg.dedupe_window_s), meta
 
 
 def _dedupe(video: Path, hits: list[float], window_s: float) -> list[KillEvent]:

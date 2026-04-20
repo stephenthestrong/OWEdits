@@ -10,7 +10,6 @@ from . import clip as clip_mod
 from . import events as events_mod
 from . import extract_templates as templates_mod
 from . import feed_detect
-from .video import probe
 
 
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi"}
@@ -30,15 +29,21 @@ def _iter_videos(folder: Path) -> list[Path]:
     return sorted(p for p in folder.rglob("*") if p.suffix.lower() in VIDEO_EXTS)
 
 
+def _load_templates(cfg: cfg_mod.Config):
+    elim_x = feed_detect.load_template(cfg.templates_dir / "elim-x.png")
+    player_icon_path = cfg.templates_dir / "player-icon.png"
+    player_icon = feed_detect.load_template(player_icon_path) if player_icon_path.exists() else None
+    return elim_x, player_icon
+
+
 def _scan_one(
     video: Path,
     cfg: cfg_mod.Config,
     elim_x,
     player_icon,
 ) -> list[events_mod.HighlightEvent]:
-    kills = feed_detect.detect_kill_frames(video, cfg, elim_x, player_icon)
-    duration = probe(video).duration_s
-    return events_mod.group(kills, cfg, duration)
+    kills, meta = feed_detect.detect_kill_frames(video, cfg, elim_x, player_icon)
+    return events_mod.group(kills, cfg, meta.duration_s)
 
 
 @main.command("extract-templates")
@@ -61,13 +66,10 @@ def extract_templates_cmd(sample: Path, config_path: str) -> None:
 @main.command("scan")
 @click.option("--config", "config_path", default="config.yaml",
               type=click.Path(exists=True, dir_okay=False), show_default=True)
-@click.option("--dry-run", is_flag=True, help="Alias for scan (no clipping happens either way).")
-def scan_cmd(config_path: str, dry_run: bool) -> None:  # noqa: ARG001 (dry_run purely cosmetic here)
+def scan_cmd(config_path: str) -> None:
     """Scan every video in input_dir and print detected events without cutting."""
     cfg = _load_config(config_path)
-    elim_x = feed_detect.load_template(cfg.templates_dir / "elim-x.png")
-    player_icon_path = cfg.templates_dir / "player-icon.png"
-    player_icon = feed_detect.load_template(player_icon_path) if player_icon_path.exists() else None
+    elim_x, player_icon = _load_templates(cfg)
 
     videos = _iter_videos(cfg.input_dir)
     if not videos:
@@ -88,9 +90,7 @@ def scan_cmd(config_path: str, dry_run: bool) -> None:  # noqa: ARG001 (dry_run 
 def clip_cmd(config_path: str) -> None:
     """Scan videos, cut per-event clips, and (if enabled) build the montage."""
     cfg = _load_config(config_path)
-    elim_x = feed_detect.load_template(cfg.templates_dir / "elim-x.png")
-    player_icon_path = cfg.templates_dir / "player-icon.png"
-    player_icon = feed_detect.load_template(player_icon_path) if player_icon_path.exists() else None
+    elim_x, player_icon = _load_templates(cfg)
 
     videos = _iter_videos(cfg.input_dir)
     if not videos:
