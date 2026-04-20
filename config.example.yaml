@@ -1,0 +1,45 @@
+# Copy to config.yaml and edit.
+
+input_dir: "C:/Users/YOU/Videos/Overwatch"
+output_dir: "C:/Users/YOU/Videos/OWEdits"
+
+# Folder holding player-icon.png and elim-x.png (created by `owedits extract-templates`)
+templates_dir: "./templates"
+
+# Pre-/post-roll around each detected event (seconds)
+pre_roll: 10
+post_roll: 5
+
+# Kill-feed region as fractions of the frame (top-right corner on OW2 at 16:9)
+feed_region:
+  x: 0.70
+  y: 0.08
+  w: 0.29
+  h: 0.25
+
+# Frame sampling rate while scanning (frames per second). 4 is a good balance.
+sample_fps: 4
+
+# Match-score thresholds for cv2.matchTemplate (TM_CCOEFF_NORMED, range -1..1)
+match_thresholds:
+  elim_x: 0.70
+  player_icon: 0.65
+
+# Ignore a kill if another fires within this many seconds (feed rows linger ~4s)
+dedupe_window_s: 2.0
+
+# What counts as an event
+multikill:
+  min_kills: 2
+  window_s: 4.0
+team_wipe:
+  min_kills: 4
+  window_s: 8.0
+
+# Clip method: "copy" (fast, snaps to keyframes) or "reencode" (slow, exact cuts)
+clip_method: "copy"
+
+# Montage reel (concat of all clips)
+montage:
+  enabled: true
+  filename: "highlights.mp4"
