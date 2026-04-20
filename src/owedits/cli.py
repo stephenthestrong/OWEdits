@@ -80,8 +80,9 @@ def extract_templates_cmd(sample: Path, config_path: str) -> None:
     click.echo(f"  kill rows seen: {res.kill_rows_seen}")
     click.echo(f"  player-icon cluster size: {res.icon_cluster_size}")
     click.echo(f"  wrote {res.elim_x_path}")
-    click.echo(f"  wrote {res.player_icon_path}")
-    click.echo("Open both and spot-check they look right before running `owedits clip`.")
+    if res.player_icon_path:
+        click.echo(f"  wrote {res.player_icon_path}")
+    click.echo("Open elim-x.png and spot-check it looks like the circular ability icon before running `owedits clip`.")
 
 
 @main.command("scan")

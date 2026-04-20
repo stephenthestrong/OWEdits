@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 import pytest
 
-from owedits.feed_detect import KillEvent, _dedupe_by_row, _nms_matches, red_mask
+from owedits.feed_detect import KillEvent, _dedupe_by_row, _nms_matches
 
 
 def test_dedupe_by_row_drops_within_window():
@@ -25,14 +25,6 @@ def test_dedupe_by_row_different_rows_not_merged():
 def test_dedupe_by_row_empty():
     assert _dedupe_by_row(Path("a.mp4"), [], window_s=2.0, row_h=20) == []
 
-
-def test_red_mask_detects_saturated_red():
-    img = np.zeros((50, 50, 3), dtype=np.uint8)
-    img[20:30, 20:30] = (0, 0, 255)  # BGR red
-    mask = red_mask(img)
-    assert mask[25, 25] > 0
-    assert mask[0, 0] == 0
-    assert cv2.countNonZero(mask) == 100
 
 
 def test_nms_matches_finds_multiple_peaks():

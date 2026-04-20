@@ -11,11 +11,8 @@ from .config import Config
 from .video import VideoMeta, crop, iter_frames, probe
 
 
-# OW's elim-X is a saturated red. Two hue bands wrap around 0/180 in HSV.
-RED_HSV_LOW_1 = np.array([0, 120, 120], dtype=np.uint8)
-RED_HSV_HIGH_1 = np.array([10, 255, 255], dtype=np.uint8)
-RED_HSV_LOW_2 = np.array([170, 120, 120], dtype=np.uint8)
-RED_HSV_HIGH_2 = np.array([180, 255, 255], dtype=np.uint8)
+# Kill-feed rows appear below the team scoreboard; skip the top 25% of the ROI.
+_KF_ZONE_FRAC = 0.25
 
 
 @dataclass
@@ -30,11 +27,12 @@ class Detector(Protocol):
         ...
 
 
-def red_mask(bgr: np.ndarray) -> np.ndarray:
-    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-    m1 = cv2.inRange(hsv, RED_HSV_LOW_1, RED_HSV_HIGH_1)
-    m2 = cv2.inRange(hsv, RED_HSV_LOW_2, RED_HSV_HIGH_2)
-    return cv2.bitwise_or(m1, m2)
+def _has_kf_content(roi: np.ndarray) -> bool:
+    """Quick pre-filter: returns True if the kill-feed zone has enough variation to warrant matching."""
+    kf_y = int(roi.shape[0] * _KF_ZONE_FRAC)
+    zone = roi[kf_y:, :]
+    gray = cv2.cvtColor(zone, cv2.COLOR_BGR2GRAY)
+    return float(gray.std()) > 12.0
 
 
 def _nms_matches(
@@ -85,24 +83,12 @@ def detect_kill_frames(
         if roi.size == 0:
             continue
 
-        # cheap pre-filter: require some red in the ROI
-        mask = red_mask(roi)
-        if cv2.countNonZero(mask) < tpl_h * tpl_w // 4:
+        # cheap pre-filter: skip frames where the kill-feed zone has no content
+        if not _has_kf_content(roi):
             continue
 
         res = cv2.matchTemplate(roi, elim_x_tpl, cv2.TM_CCOEFF_NORMED)
         for _score, mx, my in _nms_matches(res, cfg.match_thresholds.elim_x, tpl_h, tpl_w):
-            if player_icon_tpl is not None:
-                # player icon sits just LEFT of the X marker; restrict search to this row
-                pi_h, pi_w = player_icon_tpl.shape[:2]
-                left_x0 = max(0, mx - pi_w - 4)
-                left_x1 = mx + 4
-                row_y0 = my
-                row_y1 = min(roi.shape[0], my + tpl_h)
-                left_roi = roi[row_y0:row_y1, left_x0:left_x1]
-                p_score, _ = match_score(left_roi, player_icon_tpl)
-                if p_score < cfg.match_thresholds.player_icon:
-                    continue
             raw_hits.append((t, my))
 
     return _dedupe_by_row(video_path, raw_hits, cfg.dedupe_window_s, tpl_h), meta
