@@ -20,6 +20,10 @@ class VideoMeta:
     def duration_s(self) -> float:
         return self.frame_count / self.fps if self.fps else 0.0
 
+    @property
+    def aspect_ratio(self) -> float:
+        return self.width / self.height if self.height else 0.0
+
 
 def probe(path: str | Path) -> VideoMeta:
     cap = cv2.VideoCapture(str(path))

@@ -26,9 +26,9 @@ config.example.yaml    # user copies to config.yaml and edits
 1. `iter_frames` opens the video once and alternates `cap.read()` / `cap.grab()` to sample at `sample_fps` without seeking — seeking per sample was ~10× slower on long recordings.
 2. For each sampled frame, crop the kill-feed ROI (top-right; `feed_region` in config, stored as fractions so resolution-agnostic).
 3. HSV red prefilter (`red_mask`) skips frames with no red in the ROI.
-4. `cv2.matchTemplate` (TM_CCOEFF_NORMED) against `templates/elim-x.png`. Above threshold → candidate kill.
-5. If `templates/player-icon.png` exists, template-match the region immediately **left** of the X against the player icon — this filters *your* kills out from teammates' kills.
-6. Dedupe candidates within `dedupe_window_s` (feed rows linger ~4s).
+4. `cv2.matchTemplate` (TM_CCOEFF_NORMED) against `templates/elim-x.png`. Iterative NMS (`_nms_matches`) finds **all** peaks above threshold — one per kill-feed row — so stacked multi-kills in a single frame all count.
+5. If `templates/player-icon.png` exists, template-match the region immediately **left** of the X (restricted to that row's y-slice) against the player icon — filters *your* kills from teammates'.
+6. Dedupe per row-bucket within `dedupe_window_s` (`_dedupe_by_row`): same row seen again within the window is skipped; different rows at the same timestamp each produce a kill.
 7. `events.group()` slides a window over sorted kills: ≥ `team_wipe.min_kills` in `team_wipe.window_s` → `team_wipe`; else ≥ `multikill.min_kills` in `multikill.window_s` → `multikill`. Team wipe takes precedence.
 8. Each event becomes `[first_kill - pre_roll, last_kill + post_roll]`, clamped to video duration.
 
@@ -55,15 +55,23 @@ owedits clip   [--config config.yaml]     # scan + cut + montage
 owedits montage [--config config.yaml]    # combine existing clips in output_dir
 ```
 
+## Parallel scanning (v0.2)
+`cli.py` uses `ProcessPoolExecutor` (workers = cpu_count, capped at video count) to scan videos in parallel. The module-level `_scan_worker` function must stay at module level for pickle compatibility on Windows (spawn start method).
+
 ## Git
 - Develop on branch: `claude/overwatch-highlight-clipper-ij02Z` (pushed to `origin`).
-- Initial commit `4bb71c7`; cleanup commit `007807e` (sequential frame reads, drop redundant probe, remove dead code, extract `_load_templates`).
+- Initial commit `4bb71c7`; cleanup commit `007807e`; v0.2 commit adds multi-match NMS, parallel scanning, `Detector` protocol, AR warning.
 
-## Known limitations (v0.1, candidates for next iteration)
-- Single-frame template match returns only the best match → three elim rows stacked in one frame count as one kill. True multi-kills within `dedupe_window_s` can undercount. Fix: find all matches per frame above threshold, dedupe by (y-bucket, time).
-- Videos are scanned sequentially. `ProcessPoolExecutor` across videos would ~N-core speedup template matching.
-- No POTG / ult / sound-cue detection. Add as alternative detectors behind the `KillEvent` / `HighlightEvent` interface.
-- Detection assumes 16:9 gameplay with the kill-feed in the top-right.
+## Detector interface (v0.2)
+`feed_detect.Detector` is a `Protocol` with a single method:
+```python
+def detect(self, video_path: Path, cfg: Config, meta: VideoMeta) -> list[KillEvent]: ...
+```
+`KillFeedDetector` implements it. Add new event sources (POTG, ult, sound cues) by implementing `Detector` and appending to the `detectors` list built in `cli.py`.
+
+## Known limitations
+- No POTG / ult / sound-cue detection. Implement `Detector` and add to the list in `cli.py`'s scan/clip commands.
+- `_warn_aspect_ratio` only probes the first video; mixed-AR input folders won't all be caught.
 
 ## Development commands
 ```bash
