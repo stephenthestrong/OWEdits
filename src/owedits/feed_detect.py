@@ -133,29 +133,27 @@ def load_template(path: Path) -> np.ndarray:
 # on the RIGHT (victim). This signal is both specific (rejects enemy kills
 # and non-kill UI) and robust to slide/fade animation (colors are consistent
 # throughout the row's lifetime).
+#
+# All tunable constants live in Config.color_pattern so the GUI can adjust
+# them without a code change. Module-level names below are kept as fallback
+# defaults for the few callers that operate without a Config (count_kill_rows
+# tests, has_myteam_kill_pattern default-arg path).
 
 _ROW_BRIGHT_THRESH = 200        # grayscale threshold for "bright" text pixels (used by count_kill_rows)
 _MIN_BRIGHT_PX_PER_ROW = 25     # used by count_kill_rows
-_ROW_HEIGHT_FRAC = 0.039        # kill-feed row height ≈ 3.9% of frame height (≈42px @1080p)
+_FP_W, _FP_H = 32, 8            # downsampled fingerprint of a row strip
 
-# Color-pattern detection. Narrow hue/sat ranges so we match OW's UI colors
-# (highly saturated blue-teal and red), not natural-scene sky (H≈100, S≈110)
-# or architecture. OW kill-feed blue sits around H=91-95, S>140.
-_BLUE_H_LOW, _BLUE_H_HIGH = 85, 100     # OW UI blue is ~91-95; sky creeps in above 100
-_RED_H_HIGH_LOW = 170                   # red wraps around 180 in OpenCV H
-_RED_H_LOW_HIGH = 10                    # red also covers 0-10
-_COLOR_S_MIN = 130                      # UI colors are highly saturated; scene sky sits near this floor
-_COLOR_V_MIN = 80                       # minimum value — reject shadows
-_MIN_COLOR_PX_FRAC = 0.01               # each of blue/red must cover at least 1% of row
-_MIN_CENTER_SEP_FRAC = 0.10             # blue center must be left of red center by ≥ 10% of row width
-
-# Firing
-_FP_W, _FP_H = 32, 8                    # downsampled fingerprint of a row strip
-_ROW_SHIFT_THRESH = 12.0                # current second row must match prev top row within this
-                                        # to count as "previous top shifted down" (new row inserted)
-_ROW_DEDUPE_S = 0.6                     # suppress repeat fires during the slide-in animation
-_KILLFEED_RIGHT_FRAC = 1.0              # fingerprint the full row; with the tightened feed_region
-                                        # the ROI already excludes scene/HUD, so no need to trim
+# Module-level defaults, mirrored in ColorPatternCfg for easy standalone use.
+_ROW_HEIGHT_FRAC = 0.039
+_BLUE_H_LOW, _BLUE_H_HIGH = 85, 100
+_RED_H_HIGH_LOW = 170
+_RED_H_LOW_HIGH = 10
+_COLOR_S_MIN = 130
+_COLOR_V_MIN = 80
+_MIN_COLOR_PX_FRAC = 0.01
+_MIN_CENTER_SEP_FRAC = 0.10
+_ROW_SHIFT_THRESH = 12.0
+_ROW_DEDUPE_S = 0.6
 
 
 def _row_fingerprint(strip: np.ndarray) -> tuple[int, np.ndarray]:
@@ -166,24 +164,29 @@ def _row_fingerprint(strip: np.ndarray) -> tuple[int, np.ndarray]:
     return bright_count, fp
 
 
-def has_myteam_kill_pattern(row_bgr: np.ndarray) -> bool:
+def has_myteam_kill_pattern(row_bgr: np.ndarray, cp: "ColorPatternCfg | None" = None) -> bool:
     """True if the row shows a my-team kill: blue (killer) left of red (victim).
 
     Computes weighted x-centers of saturated blue and red pixel clusters in
     the row, requires both to be meaningfully present, and requires the blue
-    center to sit left of the red center by at least _MIN_CENTER_SEP_FRAC of
+    center to sit left of the red center by at least min_center_sep_frac of
     the row width. Rejects enemy kills (red-left / blue-right), empty rows
     (no saturated colors), and non-kill UI.
+
+    If `cp` is not given, uses the module-level defaults.
     """
     if row_bgr.size == 0:
         return False
+    if cp is None:
+        from .config import ColorPatternCfg
+        cp = ColorPatternCfg()
     hsv = cv2.cvtColor(row_bgr, cv2.COLOR_BGR2HSV)
     h_ch, s_ch, v_ch = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
-    color_ok = (s_ch > _COLOR_S_MIN) & (v_ch > _COLOR_V_MIN)
-    blue = ((h_ch >= _BLUE_H_LOW) & (h_ch <= _BLUE_H_HIGH) & color_ok)
-    red = (((h_ch <= _RED_H_LOW_HIGH) | (h_ch >= _RED_H_HIGH_LOW)) & color_ok)
+    color_ok = (s_ch > cp.color_s_min) & (v_ch > cp.color_v_min)
+    blue = ((h_ch >= cp.blue_h_low) & (h_ch <= cp.blue_h_high) & color_ok)
+    red = (((h_ch <= cp.red_h_low_high) | (h_ch >= cp.red_h_high_low)) & color_ok)
 
-    min_px = int(row_bgr.shape[0] * row_bgr.shape[1] * _MIN_COLOR_PX_FRAC)
+    min_px = int(row_bgr.shape[0] * row_bgr.shape[1] * cp.min_color_px_frac)
     b_sum = int(blue.sum())
     r_sum = int(red.sum())
     if b_sum < min_px or r_sum < min_px:
@@ -192,7 +195,7 @@ def has_myteam_kill_pattern(row_bgr: np.ndarray) -> bool:
     col_idx = np.arange(row_bgr.shape[1])
     b_center = float((blue.sum(axis=0) * col_idx).sum() / b_sum)
     r_center = float((red.sum(axis=0) * col_idx).sum() / r_sum)
-    min_sep = row_bgr.shape[1] * _MIN_CENTER_SEP_FRAC
+    min_sep = row_bgr.shape[1] * cp.min_center_sep_frac
     return b_center < r_center - min_sep
 
 
@@ -246,8 +249,9 @@ def detect_kill_rows(
     """
     if meta is None:
         meta = probe(video_path)
+    cp = cfg.color_pattern
     fx, fy, fw, fh = cfg.feed_region.as_pixels(meta.width, meta.height)
-    row_h = max(1, int(round(meta.height * _ROW_HEIGHT_FRAC)))
+    row_h = max(1, int(round(meta.height * cp.row_height_frac)))
 
     events: list[KillEvent] = []
     prev_top_fp: np.ndarray | None = None  # None when previous sample wasn't a my-team row
@@ -260,24 +264,21 @@ def detect_kill_rows(
         top = roi[:row_h]
         sec = roi[row_h:2 * row_h]
 
-        if not has_myteam_kill_pattern(top):
+        if not has_myteam_kill_pattern(top, cp):
             prev_top_fp = None
             continue
 
-        # Fingerprint only the right portion where the kill-feed actually
-        # sits; the left portion is scene that drifts as the player moves.
-        kf_x0 = int(top.shape[1] * (1.0 - _KILLFEED_RIGHT_FRAC))
-        _, top_fp = _row_fingerprint(top[:, kf_x0:])
-        _, sec_fp = _row_fingerprint(sec[:, kf_x0:])
+        _, top_fp = _row_fingerprint(top)
+        _, sec_fp = _row_fingerprint(sec)
 
         if prev_top_fp is None:
             do_fire = True  # empty/enemy → my-team
         else:
             # New row inserted iff the previous top now appears in the second row.
             shift_match = float(np.abs(sec_fp - prev_top_fp).mean())
-            do_fire = shift_match < _ROW_SHIFT_THRESH
+            do_fire = shift_match < cp.row_shift_thresh
 
-        if do_fire and (t - last_event_t) >= _ROW_DEDUPE_S:
+        if do_fire and (t - last_event_t) >= cp.row_dedupe_s:
             events.append(KillEvent(video=video_path, t=t))
             last_event_t = t
         prev_top_fp = top_fp

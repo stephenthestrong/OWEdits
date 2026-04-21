@@ -7,11 +7,15 @@ venv/
 *.egg-info/
 build/
 dist/
+*.spec
 
 # User config and generated content
 config.yaml
 templates/
 tests/fixtures/*.mp4
+input/
+output/
+debug/
 
 # Personal notes (not part of the project)
 obsidian-note.md

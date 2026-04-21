@@ -40,6 +40,22 @@ class MontageCfg:
 
 
 @dataclass
+class ColorPatternCfg:
+    """Knobs for the blue-left / red-right my-team-kill detector."""
+    row_height_frac: float = 0.039      # kill-feed row height as fraction of frame height
+    blue_h_low: int = 85                # OW UI blue hue range (OpenCV 0-180 scale)
+    blue_h_high: int = 100
+    red_h_low_high: int = 10            # red covers 0..low_high
+    red_h_high_low: int = 170           # ...and high_low..180
+    color_s_min: int = 130              # saturation floor (rejects sky ~S=110)
+    color_v_min: int = 80               # value floor (rejects shadows)
+    min_color_px_frac: float = 0.01     # each of blue/red must cover ≥ frac of row
+    min_center_sep_frac: float = 0.10   # blue x-center must be left of red by ≥ frac of row width
+    row_shift_thresh: float = 12.0      # prev-top-in-current-second must match within this
+    row_dedupe_s: float = 0.6           # suppress repeat fires during slide-in animation
+
+
+@dataclass
 class Config:
     input_dir: Path
     output_dir: Path
@@ -54,6 +70,7 @@ class Config:
     team_wipe: EventRule
     clip_method: str
     montage: MontageCfg = field(default_factory=MontageCfg)
+    color_pattern: ColorPatternCfg = field(default_factory=ColorPatternCfg)
 
 
 def load(path: str | Path) -> Config:
@@ -73,11 +90,13 @@ def from_dict(data: dict, base_dir: Path | None = None) -> Config:
     tw = data["team_wipe"]
     th = data.get("match_thresholds", {})
     mont = data.get("montage", {})
+    cp = data.get("color_pattern", {})
 
     clip_method = data.get("clip_method", "copy")
     if clip_method not in ("copy", "reencode"):
         raise ValueError(f"clip_method must be 'copy' or 'reencode', got {clip_method!r}")
 
+    cp_defaults = ColorPatternCfg()
     return Config(
         input_dir=_resolve(data["input_dir"]),
         output_dir=_resolve(data["output_dir"]),
@@ -98,4 +117,62 @@ def from_dict(data: dict, base_dir: Path | None = None) -> Config:
             enabled=bool(mont.get("enabled", True)),
             filename=str(mont.get("filename", "highlights.mp4")),
         ),
+        color_pattern=ColorPatternCfg(
+            row_height_frac=float(cp.get("row_height_frac", cp_defaults.row_height_frac)),
+            blue_h_low=int(cp.get("blue_h_low", cp_defaults.blue_h_low)),
+            blue_h_high=int(cp.get("blue_h_high", cp_defaults.blue_h_high)),
+            red_h_low_high=int(cp.get("red_h_low_high", cp_defaults.red_h_low_high)),
+            red_h_high_low=int(cp.get("red_h_high_low", cp_defaults.red_h_high_low)),
+            color_s_min=int(cp.get("color_s_min", cp_defaults.color_s_min)),
+            color_v_min=int(cp.get("color_v_min", cp_defaults.color_v_min)),
+            min_color_px_frac=float(cp.get("min_color_px_frac", cp_defaults.min_color_px_frac)),
+            min_center_sep_frac=float(cp.get("min_center_sep_frac", cp_defaults.min_center_sep_frac)),
+            row_shift_thresh=float(cp.get("row_shift_thresh", cp_defaults.row_shift_thresh)),
+            row_dedupe_s=float(cp.get("row_dedupe_s", cp_defaults.row_dedupe_s)),
+        ),
     )
+
+
+def to_dict(cfg: Config) -> dict:
+    """Convert a Config back to a plain-dict form suitable for yaml.safe_dump."""
+    return {
+        "input_dir": str(cfg.input_dir),
+        "output_dir": str(cfg.output_dir),
+        "templates_dir": str(cfg.templates_dir),
+        "pre_roll": cfg.pre_roll,
+        "post_roll": cfg.post_roll,
+        "feed_region": {
+            "x": cfg.feed_region.x,
+            "y": cfg.feed_region.y,
+            "w": cfg.feed_region.w,
+            "h": cfg.feed_region.h,
+        },
+        "sample_fps": cfg.sample_fps,
+        "match_thresholds": {
+            "elim_x": cfg.match_thresholds.elim_x,
+            "player_icon": cfg.match_thresholds.player_icon,
+        },
+        "dedupe_window_s": cfg.dedupe_window_s,
+        "multikill": {"min_kills": cfg.multikill.min_kills, "window_s": cfg.multikill.window_s},
+        "team_wipe": {"min_kills": cfg.team_wipe.min_kills, "window_s": cfg.team_wipe.window_s},
+        "clip_method": cfg.clip_method,
+        "montage": {"enabled": cfg.montage.enabled, "filename": cfg.montage.filename},
+        "color_pattern": {
+            "row_height_frac": cfg.color_pattern.row_height_frac,
+            "blue_h_low": cfg.color_pattern.blue_h_low,
+            "blue_h_high": cfg.color_pattern.blue_h_high,
+            "red_h_low_high": cfg.color_pattern.red_h_low_high,
+            "red_h_high_low": cfg.color_pattern.red_h_high_low,
+            "color_s_min": cfg.color_pattern.color_s_min,
+            "color_v_min": cfg.color_pattern.color_v_min,
+            "min_color_px_frac": cfg.color_pattern.min_color_px_frac,
+            "min_center_sep_frac": cfg.color_pattern.min_center_sep_frac,
+            "row_shift_thresh": cfg.color_pattern.row_shift_thresh,
+            "row_dedupe_s": cfg.color_pattern.row_dedupe_s,
+        },
+    }
+
+
+def save(cfg: Config, path: str | Path) -> None:
+    """Serialize Config to YAML at the given path."""
+    Path(path).write_text(yaml.safe_dump(to_dict(cfg), sort_keys=False, indent=2))
