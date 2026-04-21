@@ -4,7 +4,13 @@ import cv2
 import numpy as np
 import pytest
 
-from owedits.feed_detect import KillEvent, _dedupe_by_row, _nms_matches
+from owedits.feed_detect import (
+    KillEvent,
+    _dedupe_by_row,
+    _nms_matches,
+    _row_fingerprint,
+    count_kill_rows,
+)
 
 
 def test_dedupe_by_row_drops_within_window():
@@ -51,3 +57,62 @@ def test_nms_matches_suppresses_nearby():
 def test_nms_matches_none_above_threshold():
     res = np.full((50, 50), 0.5, dtype=np.float32)
     assert _nms_matches(res, threshold=0.7, suppress_h=10, suppress_w=10) == []
+
+
+def _make_roi(h: int = 300, w: int = 400) -> np.ndarray:
+    return np.zeros((h, w, 3), dtype=np.uint8)
+
+
+def _draw_row(roi: np.ndarray, y: int, row_h: int, width_px: int = 200) -> None:
+    # Bright horizontal band to simulate a kill-feed text row
+    roi[y:y + row_h, 10:10 + width_px] = 255
+
+
+def test_count_kill_rows_empty():
+    assert count_kill_rows(_make_roi(), row_h_px=42) == 0
+
+
+def test_count_kill_rows_single_row():
+    roi = _make_roi()
+    _draw_row(roi, y=20, row_h=42)
+    assert count_kill_rows(roi, row_h_px=42) == 1
+
+
+def test_count_kill_rows_multiple_rows():
+    roi = _make_roi()
+    _draw_row(roi, y=20, row_h=42)
+    _draw_row(roi, y=20 + 42 + 8, row_h=42)  # gap between rows
+    _draw_row(roi, y=20 + 2 * (42 + 8), row_h=42)
+    assert count_kill_rows(roi, row_h_px=42) == 3
+
+
+def test_count_kill_rows_noise_below_threshold_ignored():
+    roi = _make_roi()
+    # Sparse noise: a few bright pixels scattered, below _MIN_BRIGHT_PX_PER_ROW
+    roi[50, 10:20] = 255
+    assert count_kill_rows(roi, row_h_px=42) == 0
+
+
+def test_row_fingerprint_identical_when_rows_match():
+    # Row-shift detection requires that the *same* row content produces a very
+    # similar fingerprint wherever it appears. Build an identical strip twice
+    # and verify their fingerprints are near-zero apart.
+    a = _make_roi(h=42, w=400)
+    b = _make_roi(h=42, w=400)
+    for r in (a, b):
+        r[5:37, 20:220] = 255  # same row drawn in both strips
+    bc_a, fp_a = _row_fingerprint(a)
+    bc_b, fp_b = _row_fingerprint(b)
+    assert bc_a == bc_b
+    assert float(np.abs(fp_a - fp_b).mean()) < 1.0
+
+
+def test_row_fingerprint_differs_when_content_shifts():
+    a = _make_roi(h=42, w=400)
+    b = _make_roi(h=42, w=400)
+    a[5:37, 20:220] = 255   # content in columns 20-220
+    b[5:37, 120:320] = 255  # shifted content in columns 120-320
+    _, fp_a = _row_fingerprint(a)
+    _, fp_b = _row_fingerprint(b)
+    # Different horizontal position → fingerprint differs meaningfully.
+    assert float(np.abs(fp_a - fp_b).mean()) > 20.0

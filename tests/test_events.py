@@ -50,12 +50,14 @@ def test_multikill_detected():
     assert e.end_s == 37.0    # 32 + post_roll
 
 
-def test_team_wipe_preferred_over_multikill():
-    kills = _kills("a.mp4", [10.0, 11.5, 13.0, 14.5])  # 4 kills in 4.5s
+def test_burst_exceeding_window_splits_into_multiple_multikills():
+    # 4 kills in 4.5s: first 3 fit in the 4s window, the 4th is outside.
+    # Only multikills are emitted now; the 4th kill is left ungrouped.
+    kills = _kills("a.mp4", [10.0, 11.5, 13.0, 14.5])
     evs = group(kills, _cfg(), video_duration_s=60)
     assert len(evs) == 1
-    assert evs[0].kind == "team_wipe"
-    assert evs[0].kill_count == 4
+    assert evs[0].kind == "multikill"
+    assert evs[0].kill_count == 3
 
 
 def test_pair_outside_window_is_ignored():

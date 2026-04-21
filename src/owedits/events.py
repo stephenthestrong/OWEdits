@@ -22,13 +22,11 @@ class HighlightEvent:
 
 
 def group(kills: list[KillEvent], cfg: Config, video_duration_s: float) -> list[HighlightEvent]:
-    """Group a single video's kill timestamps into multikill / team_wipe events.
+    """Group a single video's kill timestamps into multikill events.
 
     Rules:
       - Scan kills with a sliding window.
-      - A burst qualifies as `team_wipe` if >= team_wipe.min_kills fit within team_wipe.window_s.
-      - Else qualifies as `multikill` if >= multikill.min_kills fit within multikill.window_s.
-      - Prefer `team_wipe` over `multikill` when both fit.
+      - A burst qualifies as `multikill` if >= multikill.min_kills fit within multikill.window_s.
       - Each kill belongs to at most one event — advance past the window after emitting.
     """
     if not kills:
@@ -40,13 +38,6 @@ def group(kills: list[KillEvent], cfg: Config, video_duration_s: float) -> list[
     i = 0
     n = len(kills)
     while i < n:
-        # Try team_wipe first (stricter)
-        j_tw = _farthest_within(kills, i, cfg.team_wipe.window_s)
-        if (j_tw - i + 1) >= cfg.team_wipe.min_kills:
-            out.append(_make_event(video, kills, i, j_tw, "team_wipe", cfg, video_duration_s))
-            i = j_tw + 1
-            continue
-
         j_mk = _farthest_within(kills, i, cfg.multikill.window_s)
         if (j_mk - i + 1) >= cfg.multikill.min_kills:
             out.append(_make_event(video, kills, i, j_mk, "multikill", cfg, video_duration_s))

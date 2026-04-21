@@ -15,8 +15,9 @@ from .video import crop, iter_frames, probe
 # Circular ability icon at 1080p is roughly 40-45px diameter.
 ICON_PATCH = (44, 44)
 
-# Kill-feed rows appear below the team scoreboard; skip the top 25% of the ROI.
-KF_ZONE_FRAC = 0.25
+# Minimum mean brightness of the inner region of a detected circle.
+# Stats-screen rounded-card corners are dark inside; ability icons have content.
+_MIN_INNER_MEAN = 70
 
 # Hough circle parameters tuned for 1080p ability icons.
 _HOUGH_PARAMS = dict(
@@ -32,6 +33,11 @@ _HOUGH_PARAMS = dict(
 # Larger phash threshold accounts for animated/spinning icons across frames.
 _PHASH_DIST = 20
 
+# Reject clusters that appear in more than this fraction of sampled frames.
+# Persistent UI elements (health-bar portraits) appear every frame; kill-feed
+# icons appear only during kills (~5-30% of frames).
+_MAX_FRAME_FREQ = 0.50
+
 
 @dataclass
 class ExtractResult:
@@ -42,14 +48,24 @@ class ExtractResult:
 
 
 def _find_ability_icons(roi: np.ndarray) -> list[tuple[int, int]]:
-    """Detect circular ability icons in the kill-feed zone. Returns (cx, cy) in ROI coords."""
-    kf_y = int(roi.shape[0] * KF_ZONE_FRAC)
-    zone = roi[kf_y:, :]
-    gray = cv2.cvtColor(zone, cv2.COLOR_BGR2GRAY)
+    """Detect circular ability icons anywhere in the ROI. Returns (cx, cy) in ROI coords."""
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
     circles = cv2.HoughCircles(gray, **_HOUGH_PARAMS)
     if circles is None:
         return []
-    return [(int(x), int(y) + kf_y) for x, y, _r in np.round(circles[0]).astype(int)]
+    ph, pw = ICON_PATCH
+    results = []
+    for x, y, _r in np.round(circles[0]).astype(int):
+        cx, cy = int(x), int(y)
+        patch = _crop_centered(roi, cx, cy, ph, pw)
+        if patch is None:
+            continue
+        # Reject stats-screen card corners: their interiors are near-black.
+        inner = patch[ph // 4 : 3 * ph // 4, pw // 4 : 3 * pw // 4]
+        if float(inner.mean()) < _MIN_INNER_MEAN:
+            continue
+        results.append((cx, cy))
+    return results
 
 
 def _crop_centered(img: np.ndarray, cx: int, cy: int, ph: int, pw: int) -> np.ndarray | None:
@@ -63,12 +79,14 @@ def _crop_centered(img: np.ndarray, cx: int, cy: int, ph: int, pw: int) -> np.nd
 def extract(sample_video: Path, cfg: Config) -> ExtractResult:
     """Scan a sample video, find the player's circular ability icon in the kill feed, and save:
 
-    - templates_dir/elim-x.png : sharpest icon crop from the largest phash cluster
+    - templates_dir/elim-x.png : sharpest icon crop from the best phash cluster
                                   (the player's most-used hero ability icon)
 
     In OW2 the kill-feed row is: [killer name] [circular ability icon] > [victim portrait] [victim name].
-    The circular icon uniquely identifies the killer's hero, so it doubles as the player filter —
-    no separate player-icon.png is needed.
+    The circular icon uniquely identifies the killer's hero, so it doubles as the player filter.
+
+    Persistent circular UI elements (e.g. health-bar hero portraits) are rejected because they
+    appear in the majority of frames, whereas kill-feed icons only appear during kills.
     """
     meta = probe(sample_video)
     fx, fy, fw, fh = cfg.feed_region.as_pixels(meta.width, meta.height)
@@ -76,12 +94,15 @@ def extract(sample_video: Path, cfg: Config) -> ExtractResult:
     ph, pw = ICON_PATCH
     icon_crops: list[np.ndarray] = []
     icon_hashes: list[imagehash.ImageHash] = []
+    icon_frame_ts: list[float] = []   # which sample timestamp each patch came from
     kill_rows = 0
+    all_ts: list[float] = []
 
-    for _t, frame in iter_frames(sample_video, max(cfg.sample_fps, 2.0)):
+    for t, frame in iter_frames(sample_video, max(cfg.sample_fps, 2.0)):
         roi = crop(frame, fx, fy, fw, fh)
         if roi.size == 0:
             continue
+        all_ts.append(t)
 
         for cx, cy in _find_ability_icons(roi):
             patch = _crop_centered(roi, cx, cy, ph, pw)
@@ -92,6 +113,7 @@ def extract(sample_video: Path, cfg: Config) -> ExtractResult:
             icon_hashes.append(
                 imagehash.phash(Image.fromarray(cv2.cvtColor(patch, cv2.COLOR_BGR2RGB)))
             )
+            icon_frame_ts.append(t)
 
     if not icon_crops:
         raise RuntimeError(
@@ -109,9 +131,21 @@ def extract(sample_video: Path, cfg: Config) -> ExtractResult:
         else:
             clusters.append([i])
 
-    biggest = max(clusters, key=len)
+    # Reject clusters that appear in too many frames — those are persistent UI elements,
+    # not transient kill-feed icons.
+    total_frames = max(len(set(all_ts)), 1)
+    valid_clusters = [
+        cl for cl in clusters
+        if len(set(icon_frame_ts[i] for i in cl)) / total_frames <= _MAX_FRAME_FREQ
+    ]
+
+    if not valid_clusters:
+        # Fallback: use all clusters if the frequency filter is too aggressive
+        valid_clusters = clusters
+
+    best_cluster = max(valid_clusters, key=len)
     best_icon = max(
-        (icon_crops[i] for i in biggest),
+        (icon_crops[i] for i in best_cluster),
         key=lambda im: cv2.Laplacian(im, cv2.CV_64F).var(),
     )
 
@@ -128,5 +162,5 @@ def extract(sample_video: Path, cfg: Config) -> ExtractResult:
         elim_x_path=elim_x_path,
         player_icon_path=None,
         kill_rows_seen=kill_rows,
-        icon_cluster_size=len(biggest),
+        icon_cluster_size=len(best_cluster),
     )

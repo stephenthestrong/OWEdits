@@ -27,11 +27,23 @@ def _iter_videos(folder: Path) -> list[Path]:
     return sorted(p for p in folder.rglob("*") if p.suffix.lower() in VIDEO_EXTS)
 
 
-def _load_templates(cfg: cfg_mod.Config):
-    elim_x = feed_detect.load_template(cfg.templates_dir / "elim-x.png")
-    player_icon_path = cfg.templates_dir / "player-icon.png"
-    player_icon = feed_detect.load_template(player_icon_path) if player_icon_path.exists() else None
-    return elim_x, player_icon
+def _build_detectors(cfg: cfg_mod.Config) -> list[feed_detect.Detector]:
+    """Default to the player-agnostic row-count detector.
+
+    Also adds the template-based KillFeedDetector if templates/elim-x.png exists —
+    the two are complementary (template gives player-specific hits when available).
+    """
+    detectors: list[feed_detect.Detector] = [feed_detect.RowCountDetector()]
+    elim_x_path = cfg.templates_dir / "elim-x.png"
+    if elim_x_path.exists():
+        elim_x = feed_detect.load_template(elim_x_path)
+        player_icon_path = cfg.templates_dir / "player-icon.png"
+        player_icon = (
+            feed_detect.load_template(player_icon_path)
+            if player_icon_path.exists() else None
+        )
+        detectors.append(feed_detect.KillFeedDetector(elim_x, player_icon))
+    return detectors
 
 
 def _warn_aspect_ratio(video: Path) -> None:
@@ -91,8 +103,7 @@ def extract_templates_cmd(sample: Path, config_path: str) -> None:
 def scan_cmd(config_path: str) -> None:
     """Scan every video in input_dir and print detected events without cutting."""
     cfg = _load_config(config_path)
-    elim_x, player_icon = _load_templates(cfg)
-    detectors = [feed_detect.KillFeedDetector(elim_x, player_icon)]
+    detectors = _build_detectors(cfg)
 
     videos = _iter_videos(cfg.input_dir)
     if not videos:
@@ -119,8 +130,7 @@ def scan_cmd(config_path: str) -> None:
 def clip_cmd(config_path: str) -> None:
     """Scan videos, cut per-event clips, and (if enabled) build the montage."""
     cfg = _load_config(config_path)
-    elim_x, player_icon = _load_templates(cfg)
-    detectors = [feed_detect.KillFeedDetector(elim_x, player_icon)]
+    detectors = _build_detectors(cfg)
 
     videos = _iter_videos(cfg.input_dir)
     if not videos:

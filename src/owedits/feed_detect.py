@@ -11,9 +11,6 @@ from .config import Config
 from .video import VideoMeta, crop, iter_frames, probe
 
 
-# Kill-feed rows appear below the team scoreboard; skip the top 25% of the ROI.
-_KF_ZONE_FRAC = 0.25
-
 
 @dataclass
 class KillEvent:
@@ -28,10 +25,8 @@ class Detector(Protocol):
 
 
 def _has_kf_content(roi: np.ndarray) -> bool:
-    """Quick pre-filter: returns True if the kill-feed zone has enough variation to warrant matching."""
-    kf_y = int(roi.shape[0] * _KF_ZONE_FRAC)
-    zone = roi[kf_y:, :]
-    gray = cv2.cvtColor(zone, cv2.COLOR_BGR2GRAY)
+    """Quick pre-filter: True if the ROI has enough variation to warrant template matching."""
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
     return float(gray.std()) > 12.0
 
 
@@ -127,3 +122,172 @@ def load_template(path: Path) -> np.ndarray:
     if img is None:
         raise FileNotFoundError(f"template not found or unreadable: {path}")
     return img
+
+
+# My-team kill detector: watches the TOP of the kill-feed for rows matching
+# the blue-left (killer = your team) + red-right (victim = enemy) pattern.
+#
+# OW2 color-codes the kill-feed: your team's name/portrait background is a
+# cyan-blue, the enemy team's is red. A kill by your team therefore produces
+# a row where blue pixels cluster on the LEFT (killer) and red pixels cluster
+# on the RIGHT (victim). This signal is both specific (rejects enemy kills
+# and non-kill UI) and robust to slide/fade animation (colors are consistent
+# throughout the row's lifetime).
+
+_ROW_BRIGHT_THRESH = 200        # grayscale threshold for "bright" text pixels (used by count_kill_rows)
+_MIN_BRIGHT_PX_PER_ROW = 25     # used by count_kill_rows
+_ROW_HEIGHT_FRAC = 0.039        # kill-feed row height ≈ 3.9% of frame height (≈42px @1080p)
+
+# Color-pattern detection. Narrow hue/sat ranges so we match OW's UI colors
+# (highly saturated blue-teal and red), not natural-scene sky (H≈100, S≈110)
+# or architecture. OW kill-feed blue sits around H=91-95, S>140.
+_BLUE_H_LOW, _BLUE_H_HIGH = 85, 100     # OW UI blue is ~91-95; sky creeps in above 100
+_RED_H_HIGH_LOW = 170                   # red wraps around 180 in OpenCV H
+_RED_H_LOW_HIGH = 10                    # red also covers 0-10
+_COLOR_S_MIN = 130                      # UI colors are highly saturated; scene sky sits near this floor
+_COLOR_V_MIN = 80                       # minimum value — reject shadows
+_MIN_COLOR_PX_FRAC = 0.01               # each of blue/red must cover at least 1% of row
+_MIN_CENTER_SEP_FRAC = 0.10             # blue center must be left of red center by ≥ 10% of row width
+
+# Firing
+_FP_W, _FP_H = 32, 8                    # downsampled fingerprint of a row strip
+_ROW_SHIFT_THRESH = 12.0                # current second row must match prev top row within this
+                                        # to count as "previous top shifted down" (new row inserted)
+_ROW_DEDUPE_S = 0.6                     # suppress repeat fires during the slide-in animation
+_KILLFEED_RIGHT_FRAC = 1.0              # fingerprint the full row; with the tightened feed_region
+                                        # the ROI already excludes scene/HUD, so no need to trim
+
+
+def _row_fingerprint(strip: np.ndarray) -> tuple[int, np.ndarray]:
+    """Return (bright_px_count, 32×8 fingerprint) of a row-height strip."""
+    gray = cv2.cvtColor(strip, cv2.COLOR_BGR2GRAY)
+    bright_count = int(np.count_nonzero(gray > _ROW_BRIGHT_THRESH))
+    fp = cv2.resize(gray, (_FP_W, _FP_H)).astype(np.float32)
+    return bright_count, fp
+
+
+def has_myteam_kill_pattern(row_bgr: np.ndarray) -> bool:
+    """True if the row shows a my-team kill: blue (killer) left of red (victim).
+
+    Computes weighted x-centers of saturated blue and red pixel clusters in
+    the row, requires both to be meaningfully present, and requires the blue
+    center to sit left of the red center by at least _MIN_CENTER_SEP_FRAC of
+    the row width. Rejects enemy kills (red-left / blue-right), empty rows
+    (no saturated colors), and non-kill UI.
+    """
+    if row_bgr.size == 0:
+        return False
+    hsv = cv2.cvtColor(row_bgr, cv2.COLOR_BGR2HSV)
+    h_ch, s_ch, v_ch = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+    color_ok = (s_ch > _COLOR_S_MIN) & (v_ch > _COLOR_V_MIN)
+    blue = ((h_ch >= _BLUE_H_LOW) & (h_ch <= _BLUE_H_HIGH) & color_ok)
+    red = (((h_ch <= _RED_H_LOW_HIGH) | (h_ch >= _RED_H_HIGH_LOW)) & color_ok)
+
+    min_px = int(row_bgr.shape[0] * row_bgr.shape[1] * _MIN_COLOR_PX_FRAC)
+    b_sum = int(blue.sum())
+    r_sum = int(red.sum())
+    if b_sum < min_px or r_sum < min_px:
+        return False
+
+    col_idx = np.arange(row_bgr.shape[1])
+    b_center = float((blue.sum(axis=0) * col_idx).sum() / b_sum)
+    r_center = float((red.sum(axis=0) * col_idx).sum() / r_sum)
+    min_sep = row_bgr.shape[1] * _MIN_CENTER_SEP_FRAC
+    return b_center < r_center - min_sep
+
+
+def count_kill_rows(roi: np.ndarray, row_h_px: int) -> int:
+    """Count horizontal kill-feed rows in the ROI by projecting bright pixels onto the y-axis.
+
+    Kept for inspection/tests; the detector uses top-strip change detection instead.
+    """
+    if roi.size == 0 or row_h_px <= 0:
+        return 0
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    bright = gray > _ROW_BRIGHT_THRESH
+    per_y = bright.sum(axis=1)
+    y_has_text = per_y > _MIN_BRIGHT_PX_PER_ROW
+
+    min_run = max(1, int(row_h_px * 0.4))
+    count = 0
+    run_start: int | None = None
+    for i, has in enumerate(y_has_text):
+        if has and run_start is None:
+            run_start = i
+        elif not has and run_start is not None:
+            run_len = i - run_start
+            if run_len >= min_run:
+                count += max(1, round(run_len / row_h_px))
+            run_start = None
+    if run_start is not None:
+        run_len = len(y_has_text) - run_start
+        if run_len >= min_run:
+            count += max(1, round(run_len / row_h_px))
+    return count
+
+
+def detect_kill_rows(
+    video_path: Path,
+    cfg: Config,
+    meta: VideoMeta | None = None,
+) -> tuple[list[KillEvent], VideoMeta]:
+    """Detect my-team kills by watching the top kill-feed row.
+
+    Fires when the top row matches the my-team color pattern
+    (blue-left / red-right) AND is a *new* row, where "new" means:
+      (a) the previous sample had no my-team row (empty / enemy → my-team), OR
+      (b) the current second row matches the previous top row — i.e. the
+          previous top got pushed down into the second slot because a new
+          row was inserted at the top.
+
+    The color gate rejects enemy kills and non-kill UI. The row-shift gate
+    separates consecutive multikills (back-to-back my-team rows with
+    different content) from the same kill staying on top.
+    """
+    if meta is None:
+        meta = probe(video_path)
+    fx, fy, fw, fh = cfg.feed_region.as_pixels(meta.width, meta.height)
+    row_h = max(1, int(round(meta.height * _ROW_HEIGHT_FRAC)))
+
+    events: list[KillEvent] = []
+    prev_top_fp: np.ndarray | None = None  # None when previous sample wasn't a my-team row
+    last_event_t = -1e9
+
+    for t, frame in iter_frames(video_path, cfg.sample_fps):
+        roi = crop(frame, fx, fy, fw, fh)
+        if roi.size == 0 or roi.shape[0] < 2 * row_h:
+            continue
+        top = roi[:row_h]
+        sec = roi[row_h:2 * row_h]
+
+        if not has_myteam_kill_pattern(top):
+            prev_top_fp = None
+            continue
+
+        # Fingerprint only the right portion where the kill-feed actually
+        # sits; the left portion is scene that drifts as the player moves.
+        kf_x0 = int(top.shape[1] * (1.0 - _KILLFEED_RIGHT_FRAC))
+        _, top_fp = _row_fingerprint(top[:, kf_x0:])
+        _, sec_fp = _row_fingerprint(sec[:, kf_x0:])
+
+        if prev_top_fp is None:
+            do_fire = True  # empty/enemy → my-team
+        else:
+            # New row inserted iff the previous top now appears in the second row.
+            shift_match = float(np.abs(sec_fp - prev_top_fp).mean())
+            do_fire = shift_match < _ROW_SHIFT_THRESH
+
+        if do_fire and (t - last_event_t) >= _ROW_DEDUPE_S:
+            events.append(KillEvent(video=video_path, t=t))
+            last_event_t = t
+        prev_top_fp = top_fp
+
+    return events, meta
+
+
+class RowCountDetector:
+    """Player-agnostic detector: fires on any new kill-feed row."""
+
+    def detect(self, video_path: Path, cfg: Config, meta: VideoMeta) -> list[KillEvent]:
+        kills, _ = detect_kill_rows(video_path, cfg, meta)
+        return kills
